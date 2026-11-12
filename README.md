@@ -4,13 +4,13 @@ This work aims to improve mammograms quality, using ML methods. It has been done
 
 This model has been trained on the well known MIAS (Mammographic Image Analysis Society) dataset.
 
-## The problem
+# The problem
 
 Breast cancer is the most commonly diagnosed cancer among women: according to the WHO, it ranked first in 157 of 185 countries in 2022, and caused an estimated 670,000 deaths worldwide that year.
 
 This mortality rate decreased over the past few decades because of strategies such as early detection through regular screening. This involves routine mammography beyond a certain age (e.g. after 50 years old in average in France).
 
-### Mammography: a quick explanation
+## Mammography: a quick explanation
 
 Mammography is a specialized medical imaging procedure using a low dose of X-rays to allow radiologists examining the human breast. 
 
@@ -20,13 +20,15 @@ The produced X-rays are coming out from a focal spot (approx 0.1-0.3mm length), 
 
 The resulting image, called *mammogram*, is a central projection with the focal spot as center, on a plane which is the screen. Each pixel $z$ receive an amount of energy carried by incoming photons, therefore their value depend on the arrival rate $\lambda(z)$ of each photons.
 
-## Noise in medical imaging
+# Noise in medical imaging
 Noise is defined by random fluctuations around the expected value that alter the true measurement (e.g. pixels in the case of images).
 
 Because of the nature of the material and methods used for the different imaging methods, sources of noise, and by the same way, their nature, can vary.
 
 In the case of mammography, which relies on X-ray photons, it is in particular affected by Poisson noise.
 Indeed, because the photons arrives at random times, the uncertainty on the received signal can be modeled as a Poisson distribution:
+
+Consider a random variable $Z \sim \mathcal P(\lambda)$ describing the number of photons on a single pixels, with $\lambda$ the expected arrival photon frequency on that pixel. We have :
 $$
 P(z|\lambda) = \frac{\lambda^z e^{-\lambda}}{z!}
 $$
@@ -34,13 +36,66 @@ $$
 
 The noisy image $Y$ received by the detector can be decomposed the following way:
 $$
-Y = \mu (Y) + V
+Y = \mathbb E[Y] + V
 $$
 where:
-- $\mu (Y)$: Expected image (noise free)
+- $\mathbb E[Y]$: Expected image (noise free)
 - $V$: Additional noise
 
-Notice that the higher $\lambda$ is, the less noisy the image is, but the more the dose is high. The purpose of this work is to keep an exploitable image, with the lowest dose of X-rays as possible.
+Since $\mathbb E[Y_i] = \mathrm{Var}(Y_i) = \lambda_i$, the signal-to-noise ratio of a pixel is
+$$
+\mathrm{SNR} = \frac{\text{signal}}{\text{noise}} = \frac{\lambda_i}{\sqrt{\lambda_i}} = \sqrt{\lambda_i}
+$$
+
+This is because, for a given pixel photon count $Z$:
+$$
+\mathbb E[Z] = \lambda, \qquad \mathrm{Var}(Z) = \lambda, \qquad \sigma_Z = \sqrt{\lambda}
+$$
+
+Notice that the higher $\lambda$ is, the less noisy the image is perceived, but the higher the dose is. The purpose of this work is to keep an exploitable image, with the lowest dose of X-rays possible.
+
+> In fact, a higher $\lambda$ gives you in absolute terms a noisier image (since $\mathrm{Var}(Z) = \lambda$), but if you consider the relative noise to the signal, it decreases (since $\sigma_Z / \mathbb E[Z] = 1/\sqrt{\lambda}$).
+
+
+
+
+## Noise simulation
+
+### Countring photons
+MIAS images are film scans where dense tissue appears bright, because few photons reached the film. Then, since a pixel value is an intensity and not a photon count, we first invert them ($z = 1 - p/255$), so that a higher value means more photons.
+
+Following the article, we will assume a linear relation between a pixel value $z$ and the photon count:
+$$
+z = k \cdot Z, \qquad Z \sim \mathcal P(\lambda)
+$$
+where $k$ is an unknown conversion factor.
+
+Then, because $\mathbb E[z] = k\lambda$ and $\mathrm{Var}(z) = k^2\lambda$, $k$ can be estimated from the data:
+$$
+k = \frac{\mathrm{Var}(z)}{\mathbb E[z]}
+$$
+and the expected photon count of each pixel is recovered as $\lambda = z / k$.
+
+In our case, $k$ is computed on each $128 \times 128$ training patch. Patches are drawn in breast tissue (mean value below 0.8 after inversion), so that the wide empty background areas are skipped.
+
+### Reducing the dose
+Because the number of photons is proportional to the dose. Reducing the dose by a factor $\alpha$ therefore scales the expected photon count, and we draw a new noisy image from:
+$$
+Z_\alpha \sim \mathcal P(\alpha\lambda), \qquad P(Z_\alpha = z) = \frac{(\alpha\lambda)^z e^{-\alpha\lambda}}{z!}
+$$
+The SNR of each pixel becomes $\sqrt{\alpha\lambda}$: a dose reduced by $\alpha$ divides the SNR by $\sqrt{\alpha}$ when $\alpha < 1$. The article simulates an 80% dose reduction. As in the article, a new noise realization is drawn every time a patch is loaded, so the network never sees the same noise twice.
+
+### Anscome Transform
+Poisson noise depends on the signal ($\mathrm{Var} = \lambda$), whereas our network (like BM3D) is designed to remove an additive noise of constant variance. We therefore apply the Anscombe transform:
+$$
+A(z) = 2\sqrt{z + \tfrac{3}{8}}
+$$
+It turns a Poisson variable into an approximately Gaussian one with unit variance (the approximation holds as long as the photon count is not too small). It is applied both to the noisy image $Z_\alpha$ (network input) and to the clean photon map $\alpha\lambda$ (target). The network thus learns to remove an approximately $\mathcal N(0, 1)$ noise, and the evaluation (PSNR, BM3D with $\sigma = 1$) is done in this same domain.
+
+**Limitations of this simulation on MIAS.**
+- $k = \mathrm{Var}(z)/\mathbb E[z]$ only holds if all the variance comes from Poisson noise. On a mammogram patch, the variance also contains anatomical structures (tissue texture, edges) and scanning noise. $k$ is therefore overestimated and $\lambda$ underestimated, so the "clean" patches already correspond to a low photon count. **This is most likely why we had to use $\alpha = 3.6 > 1$. In our setting**, $\alpha$ is not a real dose-reduction factor but a parameter that controls the noise level.
+- The linear model $z = k \cdot Z$ suits the digital detector used in the article (125 full-field digital mammograms from Siemens). It is only an approximation for scanned films, whose response to exposure is non-linear.
+- Electronic noise of the detector is not modeled, neither in the article nor here.
 
 ## The approach to solve the problem
 
